@@ -409,6 +409,7 @@ async def crash_cashout(callback: CallbackQuery):
 
 
 # ==================== MINES ====================
+
 @router.callback_query(F.data == "game_mines")
 async def mines_start(callback: CallbackQuery):
     user = await db.get_user(callback.from_user.id)
@@ -420,6 +421,7 @@ async def mines_start(callback: CallbackQuery):
     
     await db.add_balance(callback.from_user.id, -bet)
     
+    # Создаем поле: 3 мины, остальные алмазы
     board = ['💣'] * 3 + ['💎'] * 22
     random.shuffle(board)
     
@@ -430,11 +432,12 @@ async def mines_start(callback: CallbackQuery):
         "mult": 1.0
     }
     
-    await show_mines(callback.message, callback.from_user.id)
+    # Отправляем сообщение
+    msg = await callback.message.answer("💣 Инициализация игры...")
+    await show_mines(msg, callback.from_user.id)
     await callback.answer()
 
-
-async def show_mines(message, user_id):
+async def show_mines(message: Message, user_id: int):
     session = db.data["sessions"].get(str(user_id))
     if not session:
         return
@@ -448,61 +451,68 @@ async def show_mines(message, user_id):
     for i in range(0, 25, 5):
         for j in range(5):
             idx = i + j
-            display += board[idx] if idx in opened else "⬜"
-            display += " "
+            display += "⬜ " if idx not in opened else ("💣 " if board[idx] == '💣' else "💎 ")
         display += "\n"
     
     builder = InlineKeyboardBuilder()
     for i in range(25):
-        label = "✅" if i in opened else str(i+1)
-        cb = f"mine_{i}" if i not in opened else "mine_done"
-        builder.button(text=label, callback_data=cb)
+        if i in opened:
+            builder.button(text="✅", callback_data="mine_done")
+        else:
+            builder.button(text=str(i+1), callback_data=f"mine_{i}")
+    
     builder.button(text="💰 ЗАБРАТЬ", callback_data="mine_cash")
     builder.adjust(5, 5, 5, 5, 5, 1)
     
-    await message.answer(
-        f"💣 MINES\n{display}\nx{mult:.1f} | 💰 {int(bet*mult)} 💰",
-        reply_markup=builder.as_markup()
+    await message.edit_text(
+        f"💣 <b>MINES</b>\n\n{display}\n📈 Множитель: x{mult:.1f}\n💰 Текущий выигрыш: {int(bet*mult)} 💰",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
     )
-
 
 @router.callback_query(F.data.startswith("mine_"))
 async def mines_open(callback: CallbackQuery):
     cell = int(callback.data.split("_")[1])
     session = db.data["sessions"].get(str(callback.from_user.id))
     
-    if not session or cell in session["opened"]:
-        await callback.answer("❌", show_alert=True)
+    if not session:
+        await callback.answer("Игра не найдена!", show_alert=True)
+        return
+    
+    if cell in session["opened"]:
+        await callback.answer("Уже открыто")
         return
     
     session["opened"].append(cell)
     
+    # Если попал на мину
     if session["board"][cell] == '💣':
         user = await db.get_user(callback.from_user.id)
         await db.update_game_stats(callback.from_user.id, False, session["bet"], session["bet"])
         del db.data["sessions"][str(callback.from_user.id)]
         
+        # Показываем полное поле
         display = ""
         for i in range(0, 25, 5):
             for j in range(5):
                 display += session["board"][i+j] + " "
             display += "\n"
-        
-        await callback.message.answer(f"💥 МИНА!\n{display}\n-{session['bet']} 💰\n💎 {user['balance']} 💰")
+            
+        await callback.message.edit_text(f"💥 МИНА!\n\n{display}\n\n-{session['bet']} 💰\n💎 Баланс: {user['balance']} 💰")
         await callback.answer("💥")
         return
     
+    # Если чисто
     session["mult"] = round(1 + len(session["opened"]) * 0.3, 1)
     await show_mines(callback.message, callback.from_user.id)
     await callback.answer("✅")
-
 
 @router.callback_query(F.data == "mine_cash")
 async def mines_cash(callback: CallbackQuery):
     session = db.data["sessions"].get(str(callback.from_user.id))
     
     if not session or not session["opened"]:
-        await callback.answer("❌", show_alert=True)
+        await callback.answer("Сначала сделай ход!", show_alert=True)
         return
     
     bet = session["bet"]
@@ -514,18 +524,12 @@ async def mines_cash(callback: CallbackQuery):
     del db.data["sessions"][str(callback.from_user.id)]
     
     user = await db.get_user(callback.from_user.id)
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🔄 Ещё", callback_data="game_mines")
-    builder.adjust(1)
-    
-    await callback.message.answer(
-        f"🎉 +{winnings} 💰 (x{mult})\n💎 {user['balance']} 💰",
-        reply_markup=builder.as_markup()
+    await callback.message.edit_text(
+        f"🎉 <b>ВЫИГРЫШ!</b>\n\nВы забрали: {winnings} 💰 (x{mult})\n💎 Баланс: {user['balance']} 💰",
+        parse_mode="HTML"
     )
     await callback.answer(f"🎉 +{winnings} 💰")
 
-
 @router.callback_query(F.data == "mine_done")
 async def mine_done(callback: CallbackQuery):
-    await callback.answer("❌ Уже открыта", show_alert=True)
+    await callback.answer("Уже открыто!")
