@@ -1,5 +1,5 @@
 # handlers/game_handlers.py
-"""ПОЛНЫЙ ИГРОВОЙ ЦИКЛ — ВСЕ ИГРЫ РАБОТАЮТ, ЧАТ ЧИСТЫЙ, БАЛАНС ОБНОВЛЯЕТСЯ"""
+"""АРХИТЕКТУРА БЕЗ СПАМА: ОДНО СООБЩЕНИЕ + ЗАЩИТА ОТ ДВОЙНЫХ КЛИКОВ"""
 
 import asyncio
 import random
@@ -12,28 +12,43 @@ from database import db
 
 router = Router()
 
-# Эмодзи и символы
-DICE = {1: '⚀', 2: '⚁', 3: '⚂', 4: '⚃', 5: '⚄', 6: '⚅'}
-SLOTS = ['🍒', '🍋', '🍊', '🍇', '💎', '7️⃣', '🌟']
+# ==================== СИСТЕМА ЗАЩИТЫ ОТ СПАМ-КЛИКОВ ====================
+# Хранит время последнего действия пользователя
+# Ключ: user_id, Значение: timestamp последнего запроса
+_user_cooldowns: dict[int, float] = {}
 
-# Защита от спам-кликов (3 секунды между действиями)
-user_locks = {}
+# Минимальный интервал между запросами (в секундах)
+COOLDOWN_SECONDS = 2.0
 
-def is_locked(user_id: int) -> bool:
-    """Проверяет, не заблокирован ли пользователь от спама"""
+def is_on_cooldown(user_id: int) -> bool:
+    """
+    Проверяет, не слишком ли быстро пользователь нажимает кнопки.
+    Возвращает True, если нужно заблокировать запрос (кулдаун не прошёл).
+    Возвращает False, если запрос можно обработать.
+    """
     now = time.time()
-    if user_id in user_locks and now - user_locks[user_id] < 3:
-        return True
-    user_locks[user_id] = now
+    last_request = _user_cooldowns.get(user_id, 0)
+    
+    if now - last_request < COOLDOWN_SECONDS:
+        return True  # Ещё не прошло 2 секунды — блокируем
+    
+    _user_cooldowns[user_id] = now
     return False
 
-# Хранилище активных игровых сессий (Crash, Mines)
-game_sessions = {}
+
+# ==================== ИГРОВОЕ ХРАНИЛИЩЕ ====================
+# Хранит состояние активных игр (Crash, Mines)
+game_sessions: dict[str, dict] = {}
+
+
+# ==================== ЭМОДЗИ И СИМВОЛЫ ====================
+DICE = {1: '⚀', 2: '⚁', 3: '⚂', 4: '⚃', 5: '⚄', 6: '⚅'}
+SLOTS = ['🍒', '🍋', '🍊', '🍇', '💎', '7️⃣', '🌟']
 
 
 # ==================== ГЛАВНОЕ МЕНЮ ====================
 def main_menu_keyboard():
-    """Клавиатура главного меню игр"""
+    """Создаёт клавиатуру главного меню (всегда одна и та же структура)"""
     b = InlineKeyboardBuilder()
     b.button(text="🎲 Кубик", callback_data="g_dice")
     b.button(text="🎰 Слоты", callback_data="g_slots")
@@ -48,7 +63,10 @@ def main_menu_keyboard():
 
 @router.message(F.text == "🎮 Игры")
 async def show_games(msg: Message):
-    """Показать меню игр (новое сообщение только при первом входе)"""
+    """
+    Первый вход в игры — создаём ОДНО сообщение с меню.
+    Все последующие действия будут редактировать ЭТО же сообщение.
+    """
     await msg.answer(
         "🎰 <b>ИГРОВОЙ ЗАЛ</b>\n\nВыберите игру:",
         reply_markup=main_menu_keyboard(),
@@ -58,7 +76,10 @@ async def show_games(msg: Message):
 
 @router.callback_query(F.data == "menu_games")
 async def back_to_games(cb: CallbackQuery):
-    """Вернуться в меню игр (РЕДАКТИРУЕМ сообщение)"""
+    """
+    Возврат в главное меню — РЕДАКТИРУЕМ текущее сообщение.
+    Никаких новых сообщений! Чат остаётся чистым.
+    """
     await cb.message.edit_text(
         "🎰 <b>ИГРОВОЙ ЗАЛ</b>\n\nВыберите игру:",
         reply_markup=main_menu_keyboard(),
@@ -67,10 +88,27 @@ async def back_to_games(cb: CallbackQuery):
     await cb.answer()
 
 
+# ==================== УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК С ЗАЩИТОЙ ====================
+async def safe_edit(cb: CallbackQuery, text: str, reply_markup=None):
+    """
+    Безопасное редактирование сообщения с защитой от ошибок.
+    Если сообщение нельзя отредактировать — отправляет новое.
+    """
+    try:
+        await cb.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        # Если редактирование не удалось — отправляем новое сообщение
+        await cb.message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+
+
 # ==================== ПРОФИЛЬ ====================
 @router.callback_query(F.data == "g_profile")
 async def show_profile(cb: CallbackQuery):
-    """Показать профиль игрока с полной статистикой"""
+    """Профиль игрока — всё в одном сообщении через edit_text"""
+    if is_on_cooldown(cb.from_user.id):
+        await cb.answer("⏳ Подождите пару секунд!", show_alert=True)
+        return
+
     user = await db.get_user(cb.from_user.id)
     if not user:
         await cb.answer("❌ Зарегистрируйтесь: /start", show_alert=True)
@@ -100,14 +138,18 @@ async def show_profile(cb: CallbackQuery):
     b.button(text="🔙 Назад", callback_data="menu_games")
     b.adjust(1)
 
-    await cb.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="HTML")
+    await safe_edit(cb, text, b.as_markup())
     await cb.answer()
 
 
 # ==================== ТОП ИГРОКОВ ====================
 @router.callback_query(F.data == "g_top")
 async def show_top(cb: CallbackQuery):
-    """Показать топ-10 игроков по балансу"""
+    """Топ-10 игроков — редактируем сообщение"""
+    if is_on_cooldown(cb.from_user.id):
+        await cb.answer("⏳ Подождите пару секунд!", show_alert=True)
+        return
+
     top = await db.get_top_players(10)
     medals = ['🥇', '🥈', '🥉'] + ['👤'] * 7
     text = "🏆 <b>ТОП-10 ИГРОКОВ</b>\n━━━━━━━━━━━━━━━━━━\n"
@@ -120,16 +162,19 @@ async def show_top(cb: CallbackQuery):
     b.button(text="🔙 Назад", callback_data="menu_games")
     b.adjust(1)
 
-    await cb.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="HTML")
+    await safe_edit(cb, text, b.as_markup())
     await cb.answer()
 
 
-# ==================== КУБИК (DICE) ====================
+# ==================== КУБИК (DICE) — ПРИМЕР ИДЕАЛЬНОГО ОБРАБОТЧИКА ====================
 @router.callback_query(F.data == "g_dice")
 async def dice_menu(cb: CallbackQuery):
-    """Меню выбора режима кубика"""
-    if is_locked(cb.from_user.id):
-        await cb.answer("⏳ Подождите 3 секунды!", show_alert=True)
+    """
+    Меню кубика.
+    ВАЖНО: is_on_cooldown в начале каждого обработчика!
+    """
+    if is_on_cooldown(cb.from_user.id):
+        await cb.answer("⏳ Подождите пару секунд!", show_alert=True)
         return
 
     user = await db.get_user(cb.from_user.id)
@@ -143,19 +188,31 @@ async def dice_menu(cb: CallbackQuery):
     b.button(text="🔙 Назад", callback_data="menu_games")
     b.adjust(3, 2, 2, 1)
 
-    await cb.message.edit_text(
-        f"🎲 <b>КУБИК</b>\n\n💰 Баланс: {user['balance']:,} 💰\n💵 Ставка: 100 💰\n\nВыберите число или режим:",
-        reply_markup=b.as_markup(),
-        parse_mode="HTML"
+    await safe_edit(
+        cb,
+        f"🎲 <b>КУБИК</b>\n\n"
+        f"💰 Баланс: {user['balance']:,} 💰\n"
+        f"💵 Ставка: 100 💰\n\n"
+        f"Выберите число или режим:",
+        b.as_markup()
     )
     await cb.answer()
 
 
 @router.callback_query(F.data.startswith("dice_"))
 async def dice_play(cb: CallbackQuery):
-    """Игра в кубик: проверка баланса → бросок → результат → обновление БД"""
-    if is_locked(cb.from_user.id):
-        await cb.answer("⏳ Слишком быстро!", show_alert=True)
+    """
+    Игра в кубик.
+    1. Проверка кулдауна
+    2. Проверка баланса
+    3. Списание ставки
+    4. Анимация кубика
+    5. Расчёт результата
+    6. Обновление БД
+    7. Редактирование сообщения
+    """
+    if is_on_cooldown(cb.from_user.id):
+        await cb.answer("⏳ Слишком быстро! Подождите.", show_alert=True)
         return
 
     user = await db.get_user(cb.from_user.id)
@@ -163,17 +220,17 @@ async def dice_play(cb: CallbackQuery):
         await cb.answer("❌ Недостаточно средств! Минимум 100 💰", show_alert=True)
         return
 
-    # Списываем ставку
+    # Списание ставки
     await db.add_balance(cb.from_user.id, -100)
 
-    # Бросаем анимированный кубик Telegram
+    # Анимация кубика
     dice_msg = await cb.message.answer_dice(emoji=DiceEmoji.DICE)
     await asyncio.sleep(4.2)
 
     value = dice_msg.dice.value
     action = cb.data.split("_")[1]
 
-    # Определяем результат
+    # Определение результата
     won, mult = False, 0
     if action.isdigit():
         won, mult = (value == int(action)), 5.8
@@ -190,7 +247,6 @@ async def dice_play(cb: CallbackQuery):
     if won:
         await db.add_balance(cb.from_user.id, int(100 * mult))
 
-    # Обновляем статистику
     await db.update_game_stats(cb.from_user.id, won, 100, abs(profit))
     user = await db.get_user(cb.from_user.id)
 
@@ -210,16 +266,16 @@ async def dice_play(cb: CallbackQuery):
     b.adjust(1)
 
     await dice_msg.delete()
-    await cb.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="HTML")
+    await safe_edit(cb, text, b.as_markup())
     await cb.answer(f"{emoji} {result_text}")
 
 
 # ==================== СЛОТЫ (SLOTS) ====================
 @router.callback_query(F.data == "g_slots")
 async def slots_play(cb: CallbackQuery):
-    """Слоты: анимация вращения, проверка комбинаций, начисление выигрыша"""
-    if is_locked(cb.from_user.id):
-        await cb.answer("⏳ Подождите 3 секунды!", show_alert=True)
+    """Слоты: анимация + результат — всё в одном сообщении"""
+    if is_on_cooldown(cb.from_user.id):
+        await cb.answer("⏳ Подождите пару секунд!", show_alert=True)
         return
 
     user = await db.get_user(cb.from_user.id)
@@ -229,14 +285,13 @@ async def slots_play(cb: CallbackQuery):
 
     await db.add_balance(cb.from_user.id, -100)
 
-    # Анимация вращения (3 кадра)
+    # Анимация вращения
     status_msg = await cb.message.answer("🎰 Крутим барабаны...")
     for _ in range(3):
         temp = [random.choice(SLOTS) for _ in range(3)]
         await status_msg.edit_text(f"🎰 {' | '.join(temp)}\n⏳ Крутим...")
         await asyncio.sleep(0.4)
 
-    # Финальный результат
     final = [random.choice(SLOTS) for _ in range(3)]
 
     if final[0] == final[1] == final[2]:
@@ -270,14 +325,18 @@ async def slots_play(cb: CallbackQuery):
     b.button(text="🏠 В меню", callback_data="menu_games")
     b.adjust(1)
 
-    await cb.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="HTML")
+    await safe_edit(cb, text, b.as_markup())
     await cb.answer()
 
 
 # ==================== РУЛЕТКА (ROULETTE) ====================
 @router.callback_query(F.data == "g_roul")
 async def roulette_menu(cb: CallbackQuery):
-    """Меню рулетки: выбор цвета"""
+    """Меню рулетки"""
+    if is_on_cooldown(cb.from_user.id):
+        await cb.answer("⏳ Подождите пару секунд!", show_alert=True)
+        return
+
     user = await db.get_user(cb.from_user.id)
     b = InlineKeyboardBuilder()
     b.button(text="🔴 Красное (x2)", callback_data="roul_red")
@@ -286,18 +345,18 @@ async def roulette_menu(cb: CallbackQuery):
     b.button(text="🔙 Назад", callback_data="menu_games")
     b.adjust(2, 1)
 
-    await cb.message.edit_text(
+    await safe_edit(
+        cb,
         f"🎡 <b>РУЛЕТКА</b>\n\n💰 Баланс: {user['balance']:,} 💰\n💵 Ставка: 100 💰\n\nВыберите ставку:",
-        reply_markup=b.as_markup(),
-        parse_mode="HTML"
+        b.as_markup()
     )
     await cb.answer()
 
 
 @router.callback_query(F.data.startswith("roul_"))
 async def roulette_play(cb: CallbackQuery):
-    """Рулетка: дротик → число → проверка ставки → результат"""
-    if is_locked(cb.from_user.id):
+    """Игра в рулетку"""
+    if is_on_cooldown(cb.from_user.id):
         await cb.answer("⏳ Подождите!", show_alert=True)
         return
 
@@ -308,7 +367,6 @@ async def roulette_play(cb: CallbackQuery):
 
     await db.add_balance(cb.from_user.id, -100)
 
-    # Анимация дротика
     dart = await cb.message.answer_dice(emoji='🎯')
     await asyncio.sleep(4)
 
@@ -348,15 +406,15 @@ async def roulette_play(cb: CallbackQuery):
     b.button(text="🏠 В меню", callback_data="menu_games")
     b.adjust(1)
 
-    await cb.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="HTML")
+    await safe_edit(cb, text, b.as_markup())
     await cb.answer()
 
 
 # ==================== CRASH ====================
 @router.callback_query(F.data == "g_crash")
 async def crash_start(cb: CallbackQuery):
-    """Crash: запуск игры с анимацией роста множителя"""
-    if is_locked(cb.from_user.id):
+    """Crash: запуск игры"""
+    if is_on_cooldown(cb.from_user.id):
         await cb.answer("⏳ Подождите!", show_alert=True)
         return
 
@@ -376,10 +434,10 @@ async def crash_start(cb: CallbackQuery):
     b = InlineKeyboardBuilder()
     b.button(text="💰 ЗАБРАТЬ", callback_data="crash_cash")
 
-    await cb.message.edit_text(
+    await safe_edit(
+        cb,
         f"📈 <b>CRASH</b>\n\nМножитель: x1.0\n💰 Потенциал: 100 💰\n\nНажмите кнопку чтобы забрать!",
-        reply_markup=b.as_markup(),
-        parse_mode="HTML"
+        b.as_markup()
     )
     await cb.answer()
 
@@ -387,7 +445,7 @@ async def crash_start(cb: CallbackQuery):
 
 
 async def crash_animation(msg, user_id):
-    """Анимация роста множителя в фоне"""
+    """Анимация роста множителя"""
     await asyncio.sleep(0.5)
 
     for _ in range(40):
@@ -447,10 +505,10 @@ async def crash_cashout(cb: CallbackQuery):
     b.button(text="🔄 Играть снова", callback_data="g_crash")
     b.button(text="🏠 В меню", callback_data="menu_games")
 
-    await cb.message.edit_text(
+    await safe_edit(
+        cb,
         f"🎉 <b>ВЫИГРЫШ!</b>\n\nМножитель: x{mult}\nВыигрыш: +{winnings} 💰\n💎 Баланс: {user['balance']:,} 💰",
-        reply_markup=b.as_markup(),
-        parse_mode="HTML"
+        b.as_markup()
     )
     await cb.answer(f"🎉 +{winnings} 💰")
 
@@ -458,7 +516,11 @@ async def crash_cashout(cb: CallbackQuery):
 # ==================== MINES ====================
 @router.callback_query(F.data == "g_mines")
 async def mines_start(cb: CallbackQuery):
-    """Mines: создание поля 5x5 с минами"""
+    """Mines: создание поля 5x5"""
+    if is_on_cooldown(cb.from_user.id):
+        await cb.answer("⏳ Подождите пару секунд!", show_alert=True)
+        return
+
     user = await db.get_user(cb.from_user.id)
     if user['balance'] < 150:
         await cb.answer("❌ Недостаточно средств!", show_alert=True)
@@ -536,10 +598,10 @@ async def mines_open(cb: CallbackQuery):
         b.button(text="🔄 Играть снова", callback_data="g_mines")
         b.button(text="🏠 В меню", callback_data="menu_games")
 
-        await cb.message.edit_text(
+        await safe_edit(
+            cb,
             f"💥 <b>МИНА!</b>\n\n{display}\n-{s['bet']} 💰\n💎 Баланс: {user['balance']:,} 💰",
-            reply_markup=b.as_markup(),
-            parse_mode="HTML"
+            b.as_markup()
         )
         await cb.answer("💥")
         return
@@ -570,12 +632,13 @@ async def mines_cash(cb: CallbackQuery):
 
     b = InlineKeyboardBuilder()
     b.button(text="🔄 Играть снова", callback_data="g_mines")
-    b.button(text="🏠 В меню", callback_data="menu_games")
+    b.button(text="🏠 В меню"
+    callback_data="menu_games")
 
-    await cb.message.edit_text(
+    await safe_edit(
+        cb,
         f"🎉 <b>ВЫИГРЫШ!</b>\n\nОткрыто ячеек: {len(s['opened'])}\nМножитель: x{mult:.1f}\n+{winnings} 💰\n💎 Баланс: {user['balance']:,} 💰",
-        reply_markup=b.as_markup(),
-        parse_mode="HTML"
+        b.as_markup()
     )
     await cb.answer(f"🎉 +{winnings} 💰")
 
