@@ -66,6 +66,28 @@ async def cmd_give_coins(message: Message):
         await message.answer("❌ Использование: /give [user_id] [amount]")
 
 
+@router.message(Command("take"))
+async def cmd_take_coins(message: Message):
+    """Снять монеты у пользователя"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    try:
+        args = message.text.split()
+        user_id = int(args[1])
+        amount = int(args[2])
+        
+        new_balance = await db.add_balance(user_id, -amount)
+        await db.add_transaction(user_id, "admin_take", amount, f"Снято администратором {message.from_user.id}")
+        
+        await message.answer(
+            f"✅ Снято {format_number(amount)} 💰 у пользователя {user_id}\n"
+            f"💰 Новый баланс: {format_number(new_balance)} 💰"
+        )
+    except (IndexError, ValueError):
+        await message.answer("❌ Использование: /take [user_id] [amount]")
+
+
 @router.message(Command("ban"))
 async def cmd_ban_user(message: Message):
     """Заблокировать пользователя"""
@@ -74,13 +96,27 @@ async def cmd_ban_user(message: Message):
     
     try:
         user_id = int(message.text.split()[1])
-        
-        async with db.db_name:
-            await db.execute(
-                "UPDATE users SET is_banned = 1 WHERE user_id = ?",
-                (user_id,)
-            )
-        
+        await db._execute(
+            "UPDATE users SET is_banned = 1 WHERE user_id = ?",
+            (user_id,)
+        )
         await message.answer(f"✅ Пользователь {user_id} заблокирован")
-    except:
+    except (IndexError, ValueError):
         await message.answer("❌ Использование: /ban [user_id]")
+
+
+@router.message(Command("unban"))
+async def cmd_unban_user(message: Message):
+    """Разблокировать пользователя"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    try:
+        user_id = int(message.text.split()[1])
+        await db._execute(
+            "UPDATE users SET is_banned = 0 WHERE user_id = ?",
+            (user_id,)
+        )
+        await message.answer(f"✅ Пользователь {user_id} разблокирован")
+    except (IndexError, ValueError):
+        await message.answer("❌ Использование: /unban [user_id]")
