@@ -10,8 +10,8 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="🎮 Игры"), KeyboardButton(text="💰 Баланс")],
             [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🎁 Бонус")],
-            [KeyboardButton(text="❓ Помощь"), KeyboardButton(text="💳 пополнить баланс")]
-            [keyboardButton(text="💲 вывод средств")]
+            [KeyboardButton(text="👥 Рефералы"), KeyboardButton(text="🏆 Топ")],
+            [KeyboardButton(text="❓ Помощь")]
         ],
         resize_keyboard=True
     )
