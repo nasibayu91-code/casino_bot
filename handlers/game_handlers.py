@@ -979,7 +979,7 @@ async def mines_cash(cb: CallbackQuery):
 
 @router.callback_query(F.data == "mine_noop")
 async def mine_noop(cb: CallbackQuery):
-    await cb.answer("❌ Уже открыта!"), show_alert=True)kup()
+    await cb.answer("❌ Уже открыта!"), show_alert=True)
 
 # ==================== CRASH ====================
 @router.callback_query(F.data == "g_crash")
