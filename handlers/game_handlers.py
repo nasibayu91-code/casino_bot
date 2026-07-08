@@ -424,87 +424,104 @@ async def slots_play(cb: CallbackQuery):
 
 
 # ==================== РУЛЕТКА ====================
-@router.callback_query(F.data == "g_roul")
-async def roulette_menu(cb: CallbackQuery):
-    """Меню рулетки"""
-    if is_on_cooldown(cb.from_user.id):
-        await safe_answer(cb, "⏳")
-        return
-    
-    user = await db.get_user(cb.from_user.id)
+async def spin_roulette(callback: CallbackQuery, bet_amount: int, user_id: int) -> None:
+    """
+    Запуск анимации вращения рулетки.
+    """
+    wheel = ROULETTE_NUMBERS
+    segments = len(wheel)
+    result_index = random.randint(0, segments - 1)
+    result_number = wheel[result_index]
+    result_color = get_color(result_number)
+
+    # Получаем текущий баланс игрока из БД
+    user = db.get_user(user_id)
     if not user:
-        await safe_answer(cb, "❌ /start", alert=True)
+        await callback.answer("❌ Пользователь не найден.")
         return
-    
-    if user['balance'] < 100:
-        await safe_answer(cb, "❌ Недостаточно средств!", alert=True)
-        return
-    
-    b = InlineKeyboardBuilder()
-    b.button(text="🔴 Красное (x2)", callback_data="roul_red")
-    b.button(text="⚫ Чёрное (x2)", callback_data="roul_black")
-    b.button(text="🟢 Зеро (x35)", callback_data="roul_green")
-    b.button(text="🔙 Назад", callback_data="menu_games")
-    b.adjust(2, 1)
-    
-    await safe_edit(cb, f"🎡 <b>РУЛЕТКА</b>\n\n💰 Баланс: {user['balance']:,} 💰\n💵 Ставка: 100 💰\n\nВыберите ставку:", b.as_markup())
-    await safe_answer(cb, "")
+    current_balance = user["balance"]
 
+    # Сохраняем состояние в callback_data.message
+    # (или передадим через callback.answer, но лучше сохранить в сессию/кэш)
+    # Пока сохраним в data для передачи в finish_roulette
+    spin_data = {
+        "bet": bet_amount,
+        "result_index": result_index,
+        "result_number": result_number,
+        "result_color": result_color,
+        "user_id": user_id,
+        "current_balance": current_balance
+    }
 
-@router.callback_query(F.data.startswith("roul_"))
-async def roulette_play(cb: CallbackQuery):
-    """Игра в рулетку"""
-    if is_on_cooldown(cb.from_user.id, timeout=1.0):
-        await safe_answer(cb, "⏳")
-        return
-    
-    user = await db.get_user(cb.from_user.id)
-    if not user or user['balance'] < 100:
-        await safe_answer(cb, "❌ Мало средств!", alert=True)
-        return
-    
-    await db.add_balance(cb.from_user.id, -100)
-    
-    try:
-        dart = await cb.message.answer_dice(emoji='🎯')
-        await asyncio.sleep(3.5)
-    except:
-        dart = None
-    
-    number = random.randint(0, 36)
-    red = [1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36]
-    color = '🔴' if number in red else '⚫'
-    
-    if number == 0:
-        color = '🟢'
-    
-    action = cb.data.split("_")[1]
-    won, mult = False, 0
-    
-    if action == "red" and color == '🔴':
-        won, mult = True, 2
-    elif action == "black" and color == '⚫':
-        won, mult = True, 2
-    elif action == "green" and number == 0:
-        won, mult = True, 35
-    
-    profit = int(100 * mult) if won else -100
-    
-    if won:
-        await db.add_balance(cb.from_user.id, int(100 * mult))
-    
-    await db.update_game_stats(cb.from_user.id, won, 100, abs(profit))
-    await db.add_game_history(cb.from_user.id, "roulette", 100, "win" if won else "loss", profit, mult)
-    
-    user = await db.get_user(cb.from_user.id)
-    
-    if dart:
+    # Анимация — 5 кадров
+    animation_frames = [wheel[(result_index - 3 + i) % segments] for i in range(7)]
+
+    message = callback.message
+
+    for i, number in enumerate(animation_frames):
+        color = get_color(number)
+        emoji = "🔴" if color == "red" else "⚫"
+        wheel_text = " → ".join([f"{emoji}{n}" for n in animation_frames])
+        anim_text = (
+            f"🎰 <b>Рулетка вращается...</b>\n\n"
+            f"{wheel_text}\n"
+            f"🎯 Ваша ставка: {bet_amount} фишек\n\n"
+            f"⏳ Ожидайте..."
+        )
         try:
-            await dart.delete()
-        except:
+            await message.edit_text(anim_text, parse_mode="HTML", reply_markup=None)
+        except Exception:
             pass
-    
-    text = f"""🎡 <b>РУЛЕТКА</b>
+        await asyncio.sleep(0.3)
+
+    # Завершаем — вызываем финиш
+    await finish_roulette(message, spin_data)
+
+async def finish_roulette(message: Message, data: dict) -> None:
+    """
+    Завершение игры в рулетку: подсчёт результата и вывод.
+    """
+    bet_amount = data["bet"]
+    result_number = data["result_number"]
+    result_color = data["result_color"]
+    user_id = data["user_id"]
+    current_balance = data["current_balance"]
+
+    # Расчёт выигрыша
+    win_amount = 0
+    win_text = ""
+    if bet_amount == 1:  # ставка на красное/чёрное (упрощённо)
+        # Здесь нужна логика ставок, пока просто заглушка
+        if result_color == "red":
+            win_amount = bet_amount * 2
+            win_text = f"✅ Выпало красное! Вы выиграли {win_amount} фишек!"
+        else:
+            win_text = f"❌ Выпало чёрное. Вы проиграли {bet_amount} фишек."
+            win_amount = -bet_amount
+    elif bet_amount == 2:  # ставка на чёт/нечет (пример)
+        if result_number % 2 == 0:
+            win_amount = bet_amount * 2
+            win_text = f"✅ Чётное! Вы выиграли {win_amount} фишек!"
+        else:
+            win_text = f"❌ Нечётное. Вы проиграли {bet_amount} фишек."
+            win_amount = -bet_amount
+    else:
+        win_amount = -bet_amount
+        win_text = f"❌ Вы проиграли {bet_amount} фишек."
+
+    new_balance = current_balance + win_amount
+    db.update_balance(user_id, new_balance)
+
+    emoji = "🔴" if result_color == "red" else "⚫"
+    result_text = (
+        f"🎰 <b>Результат рулетки</b>\n\n"
+        f"Выпало: {emoji} {result_number} ({result_color})\n"
+        f"Ставка: {bet_amount} фишек\n"
+        f"{win_text}\n"
+        f"💰 Баланс: {new_balance} фишек"
+    )
+
+    await message.edit_text(result_text, parse_mode="HTML")
 ━━━━━━━━━━━━━━━━━━
 Выпало: <b>{number} {color}</b>
 💰 <b>{'+'+str(profit) if won else profit} 💰</b>
