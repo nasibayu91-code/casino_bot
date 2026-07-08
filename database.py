@@ -12,7 +12,7 @@ class Database:
     
     def __init__(self, db_name: str = DB_NAME):
         self.db_name = db_name
-        self._lock = None  # Будет установлен позже
+        self._lock = None
     
     async def init_db(self):
         """Инициализация базы данных и создание таблиц"""
@@ -77,6 +77,10 @@ class Database:
     
     async def _execute(self, query: str, params: tuple = None, fetch: bool = False):
         """Безопасное выполнение запроса с блокировкой"""
+        if self._lock is None:
+            import asyncio
+            self._lock = asyncio.Lock()
+        
         async with self._lock:
             try:
                 async with aiosqlite.connect(self.db_name) as db:
@@ -94,7 +98,7 @@ class Database:
                     await db.commit()
                     return result
             except Exception as e:
-                print(f"DB Error: {e}")
+                print(f"❌ DB Error: {e}")
                 raise
     
     async def register_user(self, user_id: int, username: str = "", referrer_id: Optional[int] = None) -> bool:
@@ -188,6 +192,34 @@ class Database:
                VALUES (?, ?, ?, ?, ?, ?)""",
             (user_id, game_type, bet, result, profit, multiplier)
         )
+    
+    async def get_game_history(self, user_id: int, limit: int = 10) -> List[dict]:
+        """Получить историю игр пользователя"""
+        result = await self._execute(
+            """SELECT id, user_id, game_type, bet, result, profit, multiplier, played_at 
+               FROM game_history 
+               WHERE user_id = ? 
+               ORDER BY played_at DESC 
+               LIMIT ?""",
+            (user_id, limit), fetch=True
+        )
+        
+        if not result:
+            return []
+        
+        history = []
+        for row in result:
+            history.append({
+                "id": row[0],
+                "user_id": row[1],
+                "game_type": row[2],
+                "bet": row[3],
+                "result": row[4],
+                "profit": row[5],
+                "multiplier": row[6],
+                "played_at": row[7]
+            })
+        return history
     
     async def add_transaction(self, user_id: int, trans_type: str, amount: int, description: str):
         """Добавление транзакции"""
